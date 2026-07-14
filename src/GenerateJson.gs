@@ -24,11 +24,12 @@ function exportCandidateApplicationHistoryJson() {
   rows.forEach((row, index) => {
     const raw = rowToObject_(headers, row);
 
-    const date = toIsoDateString_(raw["Run Date"]);
+    const rawContent = raw["Content"] || raw["Snippet"] || "";
+    const date = toIsoDateString_(raw["Run Date"] || raw["Date"]);
     const company = cleanText_(raw["Company"]);
-    const role = extractRoleForExport_(raw["Subject"], raw["Content"]);
     const subject = cleanText_(raw["Subject"]);
-    const content = cleanText_(raw["Content"]).substring(0, CONTENT_MAX_CHARS);
+    const content = cleanText_(rawContent).substring(0, CONTENT_MAX_CHARS);
+    const role = cleanText_(raw["Role"]) || extractRoleForExport_(subject, content);
     const from = cleanText_(raw["From"]);
     const threadId = cleanText_(raw["Thread ID"]);
     const messageId = cleanText_(raw["Message ID"]);
@@ -113,9 +114,20 @@ function extractRoleForExport_(subject, content) {
   const text = cleanText_([subject, content].filter(Boolean).join("\n"));
 
   const patterns = [
+    /your application to\s+(.+?)\s+at\s+.+/i,
     /Application update for\s+(.+?)\s+at\s+.+/i,
+    /application outcome[:\s-]+(.+?)(?:\n|$)/i,
+    /application outcome\s*-\s*(.+?)(?:\n|$)/i,
+    /unsuccessful job application\s*-\s*.+?\s*-\s*(.+?)(?:\n|$)/i,
+    /thank you for (?:your )?(?:recent )?application for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
+    /thanks for applying for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
+    /thank you for applying for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
+    /thank you for your interest in (?:the )?(.+?)(?: position| role| job at| at | with |\n|\.|$)/i,
+    /interest in the\s+(.+?)\s+position/i,
     /application for the\s+(.+?)\s+role\s+(?:within|with|at)\s+.+/i,
     /application for the position of\s+(.+?)(?:\.|\n|$)/i,
+    /position of\s+(.+?)(?:\n|\.|$)/i,
+    /role of\s+(.+?)(?:\n|\.|$)/i,
     /Position:\s*(.+?)(?:\n|$)/i,
     /Role:\s*(.+?)(?:\n|$)/i,
     /RE:\s*(.+?)(?:\n|$)/i
@@ -124,12 +136,36 @@ function extractRoleForExport_(subject, content) {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match && match[1]) {
-      return cleanText_(match[1])
-        .replace(/^your application for\s+/i, "")
-        .replace(/\s+/g, " ")
-        .trim();
+      return cleanRoleForExport_(match[1]);
     }
   }
 
   return "";
+}
+
+function cleanRoleForExport_(value) {
+  let role = cleanText_(value)
+    .replace(/^your application for\s+/i, "")
+    .replace(/^the\s+/i, "")
+    .replace(/\s*\(reference[:\s].*$/i, "")
+    .replace(/\s*\(req\d+\).*$/i, "")
+    .replace(/\s*req\d+.*$/i, "")
+    .replace(/\s*job id\s*-.*$/i, "")
+    .replace(/\s+advertised by\s+.*$/i, "")
+    .replace(/\s+with\s+[A-Z].*$/i, "")
+    .replace(/\s+at\s+[A-Z].*$/i, "")
+    .replace(/\s+position$/i, "")
+    .replace(/\s+role$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (/^(this|our|the|your|advertised)$/i.test(role)) {
+    return "";
+  }
+
+  if (role.length > 140) {
+    role = role.substring(0, 140).trim();
+  }
+
+  return role;
 }
