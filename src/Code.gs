@@ -188,6 +188,17 @@ function findBestRejectionMessage_(messages) {
 function classifyJobEmail(subject, body) {
   const t = norm(subject + " " + body);
 
+  // Hard positive override.
+  // Do this before rejection scoring so interview invites and acknowledgement emails
+  // are never labelled as rejections because of footer/boilerplate wording.
+  if (isPositiveApplicationEmail_(t)) {
+    return {
+      status: "Positive",
+      score: 10,
+      reason: "Positive application / interview signal"
+    };
+  }
+
   let rejection = 0;
   let positive = 0;
   let acknowledgement = 0;
@@ -201,8 +212,6 @@ function classifyJobEmail(subject, body) {
   const strongRejection = [
     [/unlikely to progress further/, "unlikely to progress further"],
     [/regret to (inform|advise)/, "regret wording"],
-
-    // Negated progression
     [/won't be (moving forward|progressing|proceeding|advancing)/, "won't be progressing"],
     [/will not be (moving forward|progressing|proceeding|advancing)/, "will not be progressing"],
     [/we won't be progressing your application/, "won't be progressing your application"],
@@ -211,15 +220,11 @@ function classifyJobEmail(subject, body) {
     [/will not be progressing .*application/, "will not be progressing application"],
     [/not be (moving forward|progressing|proceeding|advancing|taking .*next stage)/, "not moving forward/progressing"],
     [/not taking your application to the next stage/, "not taking application to next stage"],
-
-    // Telstra-style rejection
     [/decided to move forward with candidates/, "move forward with other candidates"],
     [/move forward with candidates whose experience/, "candidates whose experience more closely matches"],
     [/candidates whose experience more closely matches/, "experience more closely matches"],
     [/experience more closely matches .*requirements/, "experience more closely matches requirements"],
     [/(candidate|candidates|applicant|applicants) whose (experience|skills|background|profile|qualifications).{0,120}(closely|better|more closely).{0,50}(match|matches|align|aligns|meet|meets)/, "other candidates better match"],
-
-    // Common rejection wording
     [/not successful/, "not successful"],
     [/(application|candidate|applicant|interview|role|position).{0,80}unsuccessful/, "unsuccessful application/candidate"],
     [/unsuccessful.{0,80}(application|candidate|applicant|role|position|occasion)/, "unsuccessful wording"],
@@ -227,28 +232,21 @@ function classifyJobEmail(subject, body) {
     [/job application (has been )?unsuccessful/, "job application unsuccessful"],
     [/unsuccessful on this occasion/, "unsuccessful on this occasion"],
     [/not shortlisted/, "not shortlisted"],
-    [/not selected/, "not selected"],
     [/not selected to (move forward|progress|proceed|continue)/, "not selected to proceed"],
     [/decided not to (progress|proceed|move forward|continue)/, "decided not to progress"],
     [/decided to (move forward|proceed|progress|continue) with other (candidates|applicants)/, "progressing other candidates"],
     [/(chosen|progressed|proceeding|moving forward|continuing) with other (candidates|applicants)/, "other candidates chosen"],
     [/other candidates.{0,120}(closer|stronger|better|more closely|better suited|more suitable)/, "other candidates stronger"],
     [/another candidate.{0,120}(closer|stronger|better|more closely|better suited|more suitable)/, "another candidate stronger"],
-
-    // Filled / closed / no longer available
     [/position has been filled/, "position filled"],
     [/role.{0,80}already been filled/, "role filled"],
     [/(position|role|vacancy).{0,80}(closed|cancelled|withdrawn|no longer available)/, "role closed/cancelled"],
-
-    // Interview / next stage rejection
     [/unable to offer you an interview/, "unable to offer interview"],
     [/not able to offer you an interview/, "not able to offer interview"],
     [/not able to advance you/, "not able to advance"],
     [/unable to advance you/, "unable to advance"],
     [/we will not be taking your application to the next stage/, "not taking to next stage"],
     [/will not be invited to (interview|the next stage)/, "not invited to next stage"],
-
-    // Application reviewed but rejected
     [/we have reviewed your application.{0,120}(not|unable)/, "reviewed application not/unable"],
     [/your application has not been successful/, "application not successful"],
     [/application has not been successful/, "application not successful"],
@@ -263,8 +261,6 @@ function classifyJobEmail(subject, body) {
     [/not be advancing your application/, "not advancing application"],
     [/no longer considering your application/, "no longer considering application"],
     [/no longer under consideration/, "no longer under consideration"],
-
-    // Requirement / fit rejection
     [/profile.{0,120}does not meet.{0,120}requirements/, "profile does not meet requirements"],
     [/does not meet.{0,120}(requirements|criteria|selection criteria|role requirements)/, "does not meet requirements"],
     [/determined.{0,120}profile.{0,120}does not meet/, "profile does not meet"],
@@ -314,10 +310,6 @@ function classifyJobEmail(subject, body) {
     [/job offer/, "job offer"],
     [/offer of employment/, "offer of employment"],
     [/congratulations/, "congratulations"],
-
-    // Safer progression positives.
-    // Do NOT use plain "progressing your application" because rejection emails say:
-    // "we won't be progressing your application".
     [/(pleased|happy|excited|delighted) to .{0,80}(progress|proceed|move forward|advance)/, "positive progression"],
     [/we would like to (progress|proceed|move forward|advance)/, "would like to progress"],
     [/we'd like to (progress|proceed|move forward|advance)/, "would like to progress"]
@@ -349,8 +341,6 @@ function classifyJobEmail(subject, body) {
     }
   });
 
-  // Rejection wins on ties because recruiter emails often contain both:
-  // "thank you for applying" + "unfortunately" + "won't progress".
   if (rejection >= 5 && rejection >= positive) {
     return {
       status: "Rejection",
@@ -396,6 +386,43 @@ function classifyJobEmail(subject, body) {
     score: 0,
     reason: "No job rejection signal"
   };
+}
+
+function isPositiveApplicationEmail_(t) {
+  const positiveOverridePatterns = [
+    /would like to invite you to .{0,120}interview/,
+    /invite you to .{0,120}interview/,
+    /invited to .{0,120}interview/,
+    /first-round interview/,
+    /first round interview/,
+    /booking link/,
+    /interview will be held/,
+    /look forward to speaking with you/,
+    /we look forward to speaking with you/,
+    /choose the time that suits you best/,
+    /schedule .{0,80}interview/,
+    /book .{0,80}interview/
+  ];
+
+  if (positiveOverridePatterns.some(pattern => pattern.test(t))) {
+    return true;
+  }
+
+  const acknowledgementPatterns = [
+    /we are excited to receive your application/,
+    /we have received your application/,
+    /we've got your details/,
+    /we have got your details/,
+    /our talent acquisition team will review your application/,
+    /we aim to be in touch/,
+    /currently reviewing your application/
+  ];
+
+  if (acknowledgementPatterns.some(pattern => pattern.test(t))) {
+    return true;
+  }
+
+  return false;
 }
 
 function getFullEmailText(msg) {
