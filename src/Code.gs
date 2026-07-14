@@ -9,6 +9,7 @@ var SPREADSHEET_ID = "";
 function runJobRejectionScan() {
   findAndLabelNewRejections();
   extractJobRejections();
+  backfillMissingRoles();
 }
 
 function extractJobRejections() {
@@ -24,7 +25,6 @@ function extractJobRejections() {
     : [];
 
   const existingSet = new Set(existingIds.filter(Boolean));
-
   const threads = GmailApp.search('label:"' + LABEL_NAME + '" ' + SEARCH_WINDOW, 0, BATCH_SIZE);
 
   let gmailThreads = 0;
@@ -56,6 +56,7 @@ function extractJobRejections() {
 
     const subject = rejectionMsg.getSubject();
     const from = rejectionMsg.getFrom();
+    const role = extractRoleForSheet_(subject, rejectionBody);
 
     mainSheet.appendRow([
       rejectionMsg.getDate(),
@@ -65,7 +66,8 @@ function extractJobRejections() {
       rejectionBody.substring(0, 4000),
       thread.getId(),
       messageId,
-      "Rejection"
+      "Rejection",
+      role
     ]);
 
     existingSet.add(messageId);
@@ -425,6 +427,108 @@ function isPositiveApplicationEmail_(t) {
   return false;
 }
 
+function backfillMissingRoles() {
+  const ss = getSpreadsheet_();
+  const sheet = getOrCreateSheet(ss, "Job_Rejections");
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    return;
+  }
+
+  const values = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+  const updates = [];
+
+  values.forEach((row, index) => {
+    const subject = row[3];
+    const content = row[4];
+    const existingRole = row[8];
+
+    if (existingRole) {
+      updates.push([existingRole]);
+      return;
+    }
+
+    const role = extractRoleForSheet_(subject, content);
+    updates.push([role]);
+  });
+
+  sheet.getRange(2, 9, updates.length, 1).setValues(updates);
+}
+
+function extractRoleForSheet_(subject, content) {
+  if (typeof extractRoleForExport_ === "function") {
+    const exportedRole = extractRoleForExport_(subject, content);
+    if (exportedRole) {
+      return exportedRole;
+    }
+  }
+
+  const text = roleCleanText_([subject, content].filter(Boolean).join("\n"));
+
+  const patterns = [
+    /your application to\s+(.+?)\s+at\s+.+/i,
+    /application update for\s+(.+?)\s+at\s+.+/i,
+    /application outcome[:\s-]+(.+?)(?:\n|$)/i,
+    /application outcome\s*-\s*(.+?)(?:\n|$)/i,
+    /unsuccessful job application\s*-\s*.+?\s*-\s*(.+?)(?:\n|$)/i,
+    /thank you for (?:your )?(?:recent )?application for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
+    /thanks for applying for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
+    /thank you for applying for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
+    /thank you for your interest in (?:the )?(.+?)(?: position| role| job at| at | with |\n|\.|$)/i,
+    /interest in the\s+(.+?)\s+position/i,
+    /position of\s+(.+?)(?:\n|\.|$)/i,
+    /role of\s+(.+?)(?:\n|\.|$)/i,
+    /position:\s*(.+?)(?:\n|$)/i,
+    /role:\s*(.+?)(?:\n|$)/i,
+    /re:\s*(.+?)(?:\n|$)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return cleanRoleForSheet_(match[1]);
+    }
+  }
+
+  return "";
+}
+
+function cleanRoleForSheet_(value) {
+  let role = roleCleanText_(value)
+    .replace(/^your application for\s+/i, "")
+    .replace(/^the\s+/i, "")
+    .replace(/\s*\(reference[:\s].*$/i, "")
+    .replace(/\s*\(req\d+\).*$/i, "")
+    .replace(/\s*req\d+.*$/i, "")
+    .replace(/\s*job id\s*-.*$/i, "")
+    .replace(/\s+advertised by\s+.*$/i, "")
+    .replace(/\s+with\s+[A-Z].*$/i, "")
+    .replace(/\s+at\s+[A-Z].*$/i, "")
+    .replace(/\s+position$/i, "")
+    .replace(/\s+role$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (/^(this|our|the|your|advertised)$/i.test(role)) {
+    return "";
+  }
+
+  if (role.length > 140) {
+    role = role.substring(0, 140).trim();
+  }
+
+  return role;
+}
+
+function roleCleanText_(value) {
+  return String(value || "")
+    .replace(/\r/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
 function getFullEmailText(msg) {
   return [
     msg.getPlainBody(),
@@ -511,14 +615,15 @@ function getOrCreateSheet(ss, name) {
       ensureRunLogHeader_(sheet);
     } else {
       sheet.appendRow([
-        "Date",
+        "Run Date",
         "Company",
         "From",
         "Subject",
-        "Snippet",
+        "Content",
         "Thread ID",
         "Message ID",
-        "Status"
+        "Status",
+        "Role"
       ]);
     }
   }
