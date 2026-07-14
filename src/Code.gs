@@ -17,6 +17,7 @@ function extractJobRejections() {
   const mainSheet = getOrCreateSheet(ss, "Job_Rejections");
   const logSheet = getOrCreateSheet(ss, "Run_Log");
 
+  ensureMainHeader_(mainSheet);
   ensureRunLogHeader_(logSheet);
 
   const lastRow = mainSheet.getLastRow();
@@ -46,7 +47,7 @@ function extractJobRejections() {
     found++;
 
     const rejectionMsg = result.msg;
-    const rejectionBody = result.body;
+    const rawBody = result.body;
     const messageId = rejectionMsg.getId();
 
     if (existingSet.has(messageId)) {
@@ -56,14 +57,15 @@ function extractJobRejections() {
 
     const subject = rejectionMsg.getSubject();
     const from = rejectionMsg.getFrom();
-    const role = extractRoleForSheet_(subject, rejectionBody);
+    const cleanBody = cleanEmailContentForSheet_(subject, rawBody);
+    const role = extractRoleForSheet_(subject, cleanBody || rawBody);
 
     mainSheet.appendRow([
       rejectionMsg.getDate(),
-      extractCompanyName(subject, rejectionBody, from),
+      extractCompanyName(subject, cleanBody || rawBody, from),
       from,
       subject,
-      rejectionBody.substring(0, 4000),
+      cleanBody.substring(0, 4000),
       thread.getId(),
       messageId,
       "Rejection",
@@ -157,7 +159,7 @@ function findBestRejectionMessage_(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     const emailText = getFullEmailText(msg);
-    const result = classifyJobEmail(msg.getSubject(), emailText);
+    const result = classifyJobEmail(msg.getSubject(), emailText, msg.getFrom());
 
     if (result.score > bestScore) {
       bestScore = result.score;
@@ -187,17 +189,26 @@ function findBestRejectionMessage_(messages) {
   };
 }
 
-function classifyJobEmail(subject, body) {
+function classifyJobEmail(subject, body, from) {
   const t = norm(subject + " " + body);
+  const fromText = norm(from || "");
 
-  // Hard positive override.
-  // Do this before rejection scoring so interview invites and acknowledgement emails
-  // are never labelled as rejections because of footer/boilerplate wording.
+  if (isNonJobWorkEmail_(t, fromText)) {
+    return {
+      status: "Ignore",
+      score: 0,
+      reason: "Non-job work email"
+    };
+  }
+
+  // Hard positive / acknowledgement override.
+  // This prevents conditional boilerplate like "if you are not shortlisted"
+  // from being treated as an actual rejection.
   if (isPositiveApplicationEmail_(t)) {
     return {
       status: "Positive",
       score: 10,
-      reason: "Positive application / interview signal"
+      reason: "Positive or acknowledgement application signal"
     };
   }
 
@@ -233,9 +244,9 @@ function classifyJobEmail(subject, body) {
     [/application (has been )?unsuccessful/, "application unsuccessful"],
     [/job application (has been )?unsuccessful/, "job application unsuccessful"],
     [/unsuccessful on this occasion/, "unsuccessful on this occasion"],
-    [/not shortlisted/, "not shortlisted"],
-    [/not selected to (move forward|progress|proceed|continue)/, "not selected to proceed"],
-    [/decided not to (progress|proceed|move forward|continue)/, "decided not to progress"],
+    [/you have not been shortlisted/, "not shortlisted"],
+    [/we have decided not to.{0,120}(progress|proceed|move forward|continue|advance|shortlist|pursue)/, "decided not to progress"],
+    [/decided not to (progress|proceed|move forward|continue|advance|shortlist|pursue)/, "decided not to progress"],
     [/decided to (move forward|proceed|progress|continue) with other (candidates|applicants)/, "progressing other candidates"],
     [/(chosen|progressed|proceeding|moving forward|continuing) with other (candidates|applicants)/, "other candidates chosen"],
     [/other candidates.{0,120}(closer|stronger|better|more closely|better suited|more suitable)/, "other candidates stronger"],
@@ -262,7 +273,6 @@ function classifyJobEmail(subject, body) {
     [/not advance your application/, "not advance application"],
     [/not be advancing your application/, "not advancing application"],
     [/no longer considering your application/, "no longer considering application"],
-    [/no longer under consideration/, "no longer under consideration"],
     [/profile.{0,120}does not meet.{0,120}requirements/, "profile does not meet requirements"],
     [/does not meet.{0,120}(requirements|criteria|selection criteria|role requirements)/, "does not meet requirements"],
     [/determined.{0,120}profile.{0,120}does not meet/, "profile does not meet"],
@@ -284,7 +294,6 @@ function classifyJobEmail(subject, body) {
     [/competitive process/, "competitive process"],
     [/not the outcome you were hoping for/, "not the outcome hoped for"],
     [/wish you (all )?the best/, "wish you the best"],
-    [/keep in touch/, "keep in touch"],
     [/future opportunities/, "future opportunities"]
   ];
 
@@ -304,8 +313,8 @@ function classifyJobEmail(subject, body) {
     [/schedule a call/, "schedule a call"],
     [/book a time/, "book a time"],
     [/available for an interview/, "available for interview"],
-    [/invite you to interview/, "invite to interview"],
-    [/invited to interview/, "invited to interview"],
+    [/invite you to .{0,120}interview/, "invite to interview"],
+    [/invited to .{0,120}interview/, "invited to interview"],
     [/you have been shortlisted/, "shortlisted"],
     [/shortlisted for/, "shortlisted"],
     [/next stage of the interview/, "next stage interview"],
@@ -411,10 +420,20 @@ function isPositiveApplicationEmail_(t) {
   }
 
   const acknowledgementPatterns = [
+    /application has been received/,
+    /your application has been received/,
     /we are excited to receive your application/,
     /we have received your application/,
     /we've got your details/,
     /we have got your details/,
+    /thank you for submitting your cv/,
+    /thank you for your interest in our advertised position/,
+    /will assess all applications against/,
+    /if you are shortlisted/,
+    /if you are not shortlisted/,
+    /in the event that we are unable to proceed with your application/,
+    /we will review your cv carefully/,
+    /if you have been successful.*will be in touch/,
     /our talent acquisition team will review your application/,
     /we aim to be in touch/,
     /currently reviewing your application/
@@ -427,106 +446,19 @@ function isPositiveApplicationEmail_(t) {
   return false;
 }
 
-function backfillMissingRoles() {
-  const ss = getSpreadsheet_();
-  const sheet = getOrCreateSheet(ss, "Job_Rejections");
-  const lastRow = sheet.getLastRow();
-
-  if (lastRow < 2) {
-    return;
-  }
-
-  const values = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
-  const updates = [];
-
-  values.forEach((row, index) => {
-    const subject = row[3];
-    const content = row[4];
-    const existingRole = row[8];
-
-    if (existingRole) {
-      updates.push([existingRole]);
-      return;
-    }
-
-    const role = extractRoleForSheet_(subject, content);
-    updates.push([role]);
-  });
-
-  sheet.getRange(2, 9, updates.length, 1).setValues(updates);
-}
-
-function extractRoleForSheet_(subject, content) {
-  if (typeof extractRoleForExport_ === "function") {
-    const exportedRole = extractRoleForExport_(subject, content);
-    if (exportedRole) {
-      return exportedRole;
+function isNonJobWorkEmail_(t, fromText) {
+  if (fromText.indexOf("@dewr.gov.au") >= 0 || fromText.indexOf("@niaa.gov.au") >= 0) {
+    if (/(dips in earnings|jrrr|rate reduction|basic rate|casual income|continuous income|outcome is treated as full|sec=official)/.test(t)) {
+      return true;
     }
   }
 
-  const text = roleCleanText_([subject, content].filter(Boolean).join("\n"));
-
-  const patterns = [
-    /your application to\s+(.+?)\s+at\s+.+/i,
-    /application update for\s+(.+?)\s+at\s+.+/i,
-    /application outcome[:\s-]+(.+?)(?:\n|$)/i,
-    /application outcome\s*-\s*(.+?)(?:\n|$)/i,
-    /unsuccessful job application\s*-\s*.+?\s*-\s*(.+?)(?:\n|$)/i,
-    /thank you for (?:your )?(?:recent )?application for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
-    /thanks for applying for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
-    /thank you for applying for (?:the )?(?:role of |position of )?(.+?)(?: position| role| at | with | on |\n|\.|$)/i,
-    /thank you for your interest in (?:the )?(.+?)(?: position| role| job at| at | with |\n|\.|$)/i,
-    /interest in the\s+(.+?)\s+position/i,
-    /position of\s+(.+?)(?:\n|\.|$)/i,
-    /role of\s+(.+?)(?:\n|\.|$)/i,
-    /position:\s*(.+?)(?:\n|$)/i,
-    /role:\s*(.+?)(?:\n|$)/i,
-    /re:\s*(.+?)(?:\n|$)/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) {
-      return cleanRoleForSheet_(match[1]);
-    }
+  if (/(dips in earnings|jrrr|rate reduction|basic rate|casual income|continuous income|outcome is treated as full)/.test(t)
+      && !/(application|applicant|candidate|recruitment|talent acquisition|job application)/.test(t)) {
+    return true;
   }
 
-  return "";
-}
-
-function cleanRoleForSheet_(value) {
-  let role = roleCleanText_(value)
-    .replace(/^your application for\s+/i, "")
-    .replace(/^the\s+/i, "")
-    .replace(/\s*\(reference[:\s].*$/i, "")
-    .replace(/\s*\(req\d+\).*$/i, "")
-    .replace(/\s*req\d+.*$/i, "")
-    .replace(/\s*job id\s*-.*$/i, "")
-    .replace(/\s+advertised by\s+.*$/i, "")
-    .replace(/\s+with\s+[A-Z].*$/i, "")
-    .replace(/\s+at\s+[A-Z].*$/i, "")
-    .replace(/\s+position$/i, "")
-    .replace(/\s+role$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (/^(this|our|the|your|advertised)$/i.test(role)) {
-    return "";
-  }
-
-  if (role.length > 140) {
-    role = role.substring(0, 140).trim();
-  }
-
-  return role;
-}
-
-function roleCleanText_(value) {
-  return String(value || "")
-    .replace(/\r/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]+/g, " ")
-    .trim();
+  return false;
 }
 
 function getFullEmailText(msg) {
@@ -534,6 +466,64 @@ function getFullEmailText(msg) {
     msg.getPlainBody(),
     stripHtml(msg.getBody())
   ].join(" ");
+}
+
+function cleanEmailContentForSheet_(subject, body) {
+  let text = cleanTextForSheet_(body);
+
+  // LinkedIn rejections contain a large privacy/footer/header wrapper before the useful body.
+  // Keep the real rejection section and remove "Top jobs" recommendations.
+  const linkedInIndex = text.lastIndexOf("Your update from ");
+  if (linkedInIndex >= 0 && /linkedin/i.test(text)) {
+    text = text.substring(linkedInIndex);
+  }
+
+  text = cutBeforeFirst_(text, [
+    "Top jobs looking for your skills",
+    "Jobs that match your experience",
+    "Get the new LinkedIn desktop app",
+    "Also available on mobile",
+    "Never provide your bank or credit card details",
+    "Was this email useful?",
+    "Click here to unsubscribe from our emails",
+    "Unsubscribe · Help",
+    "You are receiving LinkedIn notification emails."
+  ]);
+
+  text = stripLongUrls_(text);
+  text = text.replace(/\u034f/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, " ");
+  text = text.replace(/\s{2,}/g, " ").trim();
+
+  return text;
+}
+
+function cleanTextForSheet_(value) {
+  return String(value || "")
+    .replace(/\r/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+function stripLongUrls_(value) {
+  return String(value || "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/<https?:\/\/[^>]+>/g, "")
+    .replace(/\[[^\]]*\]\s*https?:\/\/\S+/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function cutBeforeFirst_(text, markers) {
+  let cutAt = -1;
+  markers.forEach(marker => {
+    const idx = text.indexOf(marker);
+    if (idx >= 0 && (cutAt === -1 || idx < cutAt)) {
+      cutAt = idx;
+    }
+  });
+
+  return cutAt >= 0 ? text.substring(0, cutAt).trim() : text;
 }
 
 function stripHtml(html) {
@@ -568,6 +558,8 @@ function extractCompanyName(subject, body, from) {
 
   let match =
     text.match(/advertised by ([^\n\r.]+)/i) ||
+    text.match(/Your update from\s+([^\n\r]+)/i) ||
+    text.match(/application to .+? at ([^\n\r.]+)/i) ||
     text.match(/application for .*? at ([^\n\r.]+)/i) ||
     text.match(/application for job .*? at ([^\n\r.]+)/i) ||
     text.match(/position at ([^\n\r.]+)/i) ||
@@ -595,12 +587,88 @@ function cleanCompanyName_(s) {
   return String(s || "")
     .replace(/<.*?>/g, "")
     .replace(/["']/g, "")
+    .replace(/&middot;.*/gi, "")
+    .replace(/\bin\s+[A-Z][^,]+,\s+[A-Z][^,]+,\s+Australia\b/gi, "")
     .replace(/\bcareers\b/gi, "")
     .replace(/\brecruitment\b/gi, "")
     .replace(/\btalent team\b/gi, "")
     .replace(/\btalent acquisition\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function extractRoleForSheet_(subject, content) {
+  const text = cleanTextForSheet_([subject, content].filter(Boolean).join("\n"));
+
+  const patterns = [
+    /Your application to\s+(.+?)\s+at\s+.+/i,
+    /Application update for\s+(.+?)\s+at\s+.+/i,
+    /Application outcome:\s*(.+?)(?:\n|$)/i,
+    /application for job\s+(.+?)(?:\n|$)/i,
+    /job application for job\s+(.+?)(?:\n|$)/i,
+    /Thank you for your interest in the\s+(.+?)\s+(?:position|job|role)\b/i,
+    /Thank you .*? application for the\s+(.+?)\s+position/i,
+    /application for the position of\s+(.+?)(?:\.|\n|$)/i,
+    /applying for the position of\s+(.+?)(?:\.|\n|$)/i,
+    /applying for the role of\s+(.+?)(?:\.|\n|$)/i,
+    /for the role of\s+(.+?)(?:\.|\n|$)/i,
+    /role of\s+(.+?)(?:\.|\n|$)/i,
+    /position of\s+(.+?)(?:\.|\n|$)/i,
+    /Re:\s*(.+?)(?:\n|$)/i,
+    /RE:\s*(.+?)(?:\n|$)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return cleanRoleName_(match[1]);
+    }
+  }
+
+  return "";
+}
+
+function cleanRoleName_(s) {
+  return String(s || "")
+    .replace(/^your application for\s+/i, "")
+    .replace(/^the\s+/i, "")
+    .replace(/\s+at\s+.+$/i, "")
+    .replace(/\s+with\s+.+$/i, "")
+    .replace(/\s+within\s+.+$/i, "")
+    .replace(/\s+advertised by\s+.+$/i, "")
+    .replace(/\s+position$/i, "")
+    .replace(/\s+role$/i, "")
+    .replace(/[>*_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function backfillMissingRoles() {
+  const ss = getSpreadsheet_();
+  const sheet = getOrCreateSheet(ss, "Job_Rejections");
+  ensureMainHeader_(sheet);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const values = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+  const updates = [];
+
+  values.forEach((row, i) => {
+    const subject = row[3];
+    const content = row[4];
+    const currentRole = row[8];
+
+    if (!currentRole) {
+      updates.push({ row: i + 2, role: extractRoleForSheet_(subject, content) });
+    }
+  });
+
+  updates.forEach(item => {
+    if (item.role) {
+      sheet.getRange(item.row, 9).setValue(item.role);
+    }
+  });
 }
 
 function getOrCreateSheet(ss, name) {
@@ -610,25 +678,37 @@ function getOrCreateSheet(ss, name) {
     sheet = ss.insertSheet(name);
   }
 
-  if (sheet.getLastRow() === 0) {
-    if (name === "Run_Log") {
-      ensureRunLogHeader_(sheet);
-    } else {
-      sheet.appendRow([
-        "Run Date",
-        "Company",
-        "From",
-        "Subject",
-        "Content",
-        "Thread ID",
-        "Message ID",
-        "Status",
-        "Role"
-      ]);
-    }
+  if (name === "Job_Rejections") {
+    ensureMainHeader_(sheet);
+  } else if (name === "Run_Log") {
+    ensureRunLogHeader_(sheet);
   }
 
   return sheet;
+}
+
+function ensureMainHeader_(sheet) {
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow([
+      "Run Date",
+      "Company",
+      "From",
+      "Subject",
+      "Content",
+      "Thread ID",
+      "Message ID",
+      "Status",
+      "Role"
+    ]);
+    return;
+  }
+
+  const lastCol = Math.max(sheet.getLastColumn(), 9);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  if (!headers[0]) sheet.getRange(1, 1).setValue("Run Date");
+  if (!headers[4]) sheet.getRange(1, 5).setValue("Content");
+  if (!headers[8]) sheet.getRange(1, 9).setValue("Role");
 }
 
 function ensureRunLogHeader_(sheet) {
@@ -671,29 +751,26 @@ function norm(s) {
     .trim();
 }
 
+function testRecruitmentHiveAcknowledgement() {
+  const subject = "Your application has been received";
+  const body = "Thank you for your interest in our advertised position. Recruitment Hive’s team will assess all applications against our Client's role requirements. If you are shortlisted, Recruitment Hive will contact you. If you are not shortlisted, we will update your details in our systems.";
+  const result = classifyJobEmail(subject, body, "Recruitment Hive <info@recruitmenthive.com.au>");
+  Logger.log(JSON.stringify(result));
+  if (result.status === "Rejection") throw new Error("Recruitment Hive acknowledgement test failed.");
+}
+
+function testDipsInEarningsIgnore() {
+  const subject = "Re: FW: Dips in Earnings [SEC=OFFICIAL]";
+  const body = "12 Week Outcomes Remove 1 Fortnight Rate Reduction Basic Rate Casual Income Continuous Income JRRR outcome is treated as FULL";
+  const result = classifyJobEmail(subject, body, "Roberto.Voto@dewr.gov.au");
+  Logger.log(JSON.stringify(result));
+  if (result.status === "Rejection") throw new Error("Dips in Earnings test failed.");
+}
+
 function testTelstraCase() {
   const subject = "About your job application for job Senior Business Analyst - Digital Health & Data";
-
-  const body = `
-Hi Roberto
-
-Thank you so much for taking the time to apply for our Senior Business Analyst - Digital Health & Data role. We truly value the effort you put into your application.
-
-After careful review, we’ve decided to move forward with candidates whose experience more closely matches the role requirements. Unfortunately, we won’t be progressing your application this time.
-
-While this may not be the outcome you were hoping for, we’d like to keep in touch.
-
-Warm regards,
-The Talent Acquisition Team
-Telstra Health
-`;
-
-  const result = classifyJobEmail(subject, body);
+  const body = "After careful review, we’ve decided to move forward with candidates whose experience more closely matches the role requirements. Unfortunately, we won’t be progressing your application this time.";
+  const result = classifyJobEmail(subject, body, "Telstra Health Talent Team <recruitment@hris.telstrahealth.com>");
   Logger.log(JSON.stringify(result));
-
-  if (result.status !== "Rejection") {
-    throw new Error("Telstra test failed. Expected Rejection, got: " + result.status);
-  }
-
-  Logger.log("Telstra test passed.");
+  if (result.status !== "Rejection") throw new Error("Telstra test failed. Expected Rejection, got: " + result.status);
 }
