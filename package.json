@@ -1,0 +1,21 @@
+{
+  "name": "gmail-tasks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local tooling for the Gmail Tasks Google Apps Script project.",
+  "scripts": {
+    "clasp:status": "clasp status",
+    "clasp:push": "clasp push"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robvoto/gmail-tasks.git"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.4.1"
+  }
+}

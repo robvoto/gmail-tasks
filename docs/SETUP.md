@@ -34,10 +34,18 @@ Apps Script compiles all files under `src` together.
 
 ## Local WSL setup
 
-Local path used during setup:
+Canonical local WSL path:
 
 ```bash
-~/projects/gmail-tasks/gmail-tasks
+~/projects/gmail-tasks
+```
+
+Local clasp tooling requires Node 20 or newer.
+
+Install the pinned tooling with:
+
+```bash
+npm ci
 ```
 
 The repo uses clasp with:
@@ -107,6 +115,7 @@ Original Apps Script project files:
 Current GitHub source files map to:
 
 - `src/Code.gs` -> main Gmail rejection scan and export-to-sheet logic
+- `src/Tests.gs` -> safe Apps Script test functions, including `runSafeTests()`
 - `src/GenerateJson.gs` -> JSON export logic
 - `src/appsscript.json` -> Apps Script manifest required by clasp
 
